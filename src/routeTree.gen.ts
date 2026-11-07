@@ -9,50 +9,50 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiPublicJobsTickRouteImport } from './routes/api/public/jobs/tick'
 
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const ApiPublicJobsTickRoute = ApiPublicJobsTickRouteImport.update({
+  id: '/api/public/jobs/tick',
+  path: '/api/public/jobs/tick',
   getParentRoute: () => rootRouteImport,
 } as any)
 
 export interface FileRoutesByFullPath {
-  '/': typeof IndexRoute
+  '/api/public/jobs/tick': typeof ApiPublicJobsTickRoute
 }
 export interface FileRoutesByTo {
-  '/': typeof IndexRoute
+  '/api/public/jobs/tick': typeof ApiPublicJobsTickRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
-  '/': typeof IndexRoute
+  '/api/public/jobs/tick': typeof ApiPublicJobsTickRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths: '/api/public/jobs/tick'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to: '/api/public/jobs/tick'
+  id: '__root__' | '/api/public/jobs/tick'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute
+  ApiPublicJobsTickRoute: typeof ApiPublicJobsTickRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+    '/api/public/jobs/tick': {
+      id: '/api/public/jobs/tick'
+      path: '/api/public/jobs/tick'
+      fullPath: '/api/public/jobs/tick'
+      preLoaderRoute: typeof ApiPublicJobsTickRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
-  IndexRoute: IndexRoute,
+  ApiPublicJobsTickRoute: ApiPublicJobsTickRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
