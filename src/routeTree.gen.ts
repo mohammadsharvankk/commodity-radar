@@ -10,6 +10,12 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
+import { Route as AuthRouteImport } from './routes/auth'
+import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
+import { Route as AuthenticatedNewsRouteImport } from './routes/_authenticated/news'
+import { Route as AuthenticatedPatternsRouteImport } from './routes/_authenticated/patterns'
+import { Route as AuthenticatedInstrumentIdRouteImport } from './routes/_authenticated/instrument.$id'
 import { Route as ApiPublicJobsTickRouteImport } from './routes/api/public/jobs/tick'
 
 const IndexRoute = IndexRouteImport.update({
@@ -17,6 +23,36 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AuthenticatedRouteRoute = AuthenticatedRouteRouteImport.update({
+  id: '/_authenticated',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AuthRoute = AuthRouteImport.update({
+  id: '/auth',
+  path: '/auth',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AuthenticatedDashboardRoute = AuthenticatedDashboardRouteImport.update({
+  id: '/dashboard',
+  path: '/dashboard',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedNewsRoute = AuthenticatedNewsRouteImport.update({
+  id: '/news',
+  path: '/news',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedPatternsRoute = AuthenticatedPatternsRouteImport.update({
+  id: '/patterns',
+  path: '/patterns',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedInstrumentIdRoute =
+  AuthenticatedInstrumentIdRouteImport.update({
+    id: '/instrument/$id',
+    path: '/instrument/$id',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const ApiPublicJobsTickRoute = ApiPublicJobsTickRouteImport.update({
   id: '/api/public/jobs/tick',
   path: '/api/public/jobs/tick',
@@ -25,27 +61,68 @@ const ApiPublicJobsTickRoute = ApiPublicJobsTickRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/auth': typeof AuthRoute
+  '/dashboard': typeof AuthenticatedDashboardRoute
+  '/news': typeof AuthenticatedNewsRoute
+  '/patterns': typeof AuthenticatedPatternsRoute
+  '/instrument/$id': typeof AuthenticatedInstrumentIdRoute
   '/api/public/jobs/tick': typeof ApiPublicJobsTickRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/auth': typeof AuthRoute
+  '/dashboard': typeof AuthenticatedDashboardRoute
+  '/news': typeof AuthenticatedNewsRoute
+  '/patterns': typeof AuthenticatedPatternsRoute
+  '/instrument/$id': typeof AuthenticatedInstrumentIdRoute
   '/api/public/jobs/tick': typeof ApiPublicJobsTickRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/_authenticated': typeof AuthenticatedRouteRouteWithChildren
+  '/auth': typeof AuthRoute
+  '/_authenticated/dashboard': typeof AuthenticatedDashboardRoute
+  '/_authenticated/news': typeof AuthenticatedNewsRoute
+  '/_authenticated/patterns': typeof AuthenticatedPatternsRoute
+  '/_authenticated/instrument/$id': typeof AuthenticatedInstrumentIdRoute
   '/api/public/jobs/tick': typeof ApiPublicJobsTickRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/api/public/jobs/tick'
+  fullPaths:
+    | '/'
+    | '/auth'
+    | '/dashboard'
+    | '/news'
+    | '/patterns'
+    | '/instrument/$id'
+    | '/api/public/jobs/tick'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/api/public/jobs/tick'
-  id: '__root__' | '/' | '/api/public/jobs/tick'
+  to:
+    | '/'
+    | '/auth'
+    | '/dashboard'
+    | '/news'
+    | '/patterns'
+    | '/instrument/$id'
+    | '/api/public/jobs/tick'
+  id:
+    | '__root__'
+    | '/'
+    | '/_authenticated'
+    | '/auth'
+    | '/_authenticated/dashboard'
+    | '/_authenticated/news'
+    | '/_authenticated/patterns'
+    | '/_authenticated/instrument/$id'
+    | '/api/public/jobs/tick'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AuthenticatedRouteRoute: typeof AuthenticatedRouteRouteWithChildren
+  AuthRoute: typeof AuthRoute
   ApiPublicJobsTickRoute: typeof ApiPublicJobsTickRoute
 }
 
@@ -58,6 +135,48 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_authenticated': {
+      id: '/_authenticated'
+      path: ''
+      fullPath: '/'
+      preLoaderRoute: typeof AuthenticatedRouteRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/auth': {
+      id: '/auth'
+      path: '/auth'
+      fullPath: '/auth'
+      preLoaderRoute: typeof AuthRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated/dashboard': {
+      id: '/_authenticated/dashboard'
+      path: '/dashboard'
+      fullPath: '/dashboard'
+      preLoaderRoute: typeof AuthenticatedDashboardRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/news': {
+      id: '/_authenticated/news'
+      path: '/news'
+      fullPath: '/news'
+      preLoaderRoute: typeof AuthenticatedNewsRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/patterns': {
+      id: '/_authenticated/patterns'
+      path: '/patterns'
+      fullPath: '/patterns'
+      preLoaderRoute: typeof AuthenticatedPatternsRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/instrument/$id': {
+      id: '/_authenticated/instrument/$id'
+      path: '/instrument/$id'
+      fullPath: '/instrument/$id'
+      preLoaderRoute: typeof AuthenticatedInstrumentIdRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/api/public/jobs/tick': {
       id: '/api/public/jobs/tick'
       path: '/api/public/jobs/tick'
@@ -68,8 +187,27 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface AuthenticatedRouteRouteChildren {
+  AuthenticatedDashboardRoute: typeof AuthenticatedDashboardRoute
+  AuthenticatedNewsRoute: typeof AuthenticatedNewsRoute
+  AuthenticatedPatternsRoute: typeof AuthenticatedPatternsRoute
+  AuthenticatedInstrumentIdRoute: typeof AuthenticatedInstrumentIdRoute
+}
+
+const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+  AuthenticatedDashboardRoute: AuthenticatedDashboardRoute,
+  AuthenticatedNewsRoute: AuthenticatedNewsRoute,
+  AuthenticatedPatternsRoute: AuthenticatedPatternsRoute,
+  AuthenticatedInstrumentIdRoute: AuthenticatedInstrumentIdRoute,
+}
+
+const AuthenticatedRouteRouteWithChildren =
+  AuthenticatedRouteRoute._addFileChildren(AuthenticatedRouteRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
+  AuthRoute: AuthRoute,
   ApiPublicJobsTickRoute: ApiPublicJobsTickRoute,
 }
 export const routeTree = rootRouteImport

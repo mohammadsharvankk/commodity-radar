@@ -83,10 +83,10 @@
 
 :root {
   --radius: 0.5rem;
-  --background: oklch(0.145 0.012 250);
+  --background: oklch(0.145 0.003 250);
   --foreground: oklch(0.93 0.01 250);
-  --surface: oklch(0.18 0.014 250);
-  --card: oklch(0.19 0.015 250);
+  --surface: oklch(0.18 0.003 250);
+  --card: oklch(0.19 0.003 250);
   --card-foreground: oklch(0.93 0.01 250);
   --popover: oklch(0.2 0.015 250);
   --popover-foreground: oklch(0.93 0.01 250);
@@ -119,6 +119,9 @@
   --sidebar-accent-foreground: oklch(0.93 0.01 250);
   --sidebar-border: oklch(0.28 0.015 250);
   --sidebar-ring: oklch(0.8 0.13 195);
+  --session-asia: oklch(0.8 0.13 195 / 0.05);
+  --session-london: oklch(0.82 0.15 80 / 0.05);
+  --session-ny: oklch(0.76 0.17 152 / 0.05);
 }
 
 @layer base {
@@ -148,6 +151,15 @@
 @utility label-xs {
   font-size: 0.65rem;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
   color: var(--muted-foreground);
 }
+
+body { letter-spacing: 0; }
+.radar-meter { display: block; width: 100%; height: 5px; }
+.radar-meter::-webkit-meter-bar { background: var(--muted); border: 0; }
+.radar-meter::-webkit-meter-optimum-value { background: var(--primary); }
+.hour-meter { width: 100%; height: 120px; writing-mode: vertical-lr; }
+.hour-meter::-webkit-meter-bar { background: var(--muted); border: 0; }
+.hour-meter::-webkit-meter-optimum-value { background: var(--primary); }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
