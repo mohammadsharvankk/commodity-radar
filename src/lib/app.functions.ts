@@ -65,8 +65,8 @@ export const sendTestAlert = createServerFn({ method: "POST" })
 
 export const runJobNow = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((d: { job: string }) =>
-    z.object({ job: z.enum(["prices", "news", "tag", "stats", "backfill"]) }).parse(d),
+  .inputValidator((d: { job: string; instrument?: string }) =>
+    z.object({ job: z.enum(["prices", "news", "tag", "stats", "backfill"]), instrument: z.enum(INSTRUMENT_IDS as [string, ...string[]]).optional() }).parse(d),
   )
   .handler(async ({ data }) => {
     const { supabaseAdmin: db } = await import("@/integrations/supabase/client.server");
@@ -76,7 +76,7 @@ export const runJobNow = createServerFn({ method: "POST" })
       if (data.job === "news") await j.fetchNews(db);
       if (data.job === "tag") await j.tagNews(db);
       if (data.job === "stats") await j.recomputeStats(db);
-      if (data.job === "backfill") for (const id of INSTRUMENT_IDS) await j.backfillInstrument(db, id);
+      if (data.job === "backfill") for (const id of data.instrument ? [data.instrument] : INSTRUMENT_IDS) await j.backfillInstrument(db, id);
       return { ok: true, error: null as string | null };
     } catch (e) {
       return { ok: false, error: (e as Error).message };

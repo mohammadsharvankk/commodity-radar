@@ -39,7 +39,15 @@ export const saveEvent = createServerFn({ method: "POST" }).middleware([requireS
 export const saveEventDate = createServerFn({ method: "POST" }).middleware([requireSupabaseAuth])
   .inputValidator(z.object({ id: z.string().uuid().optional(), event_id: z.string().uuid(), ts: z.string().datetime(), consensus: z.number().finite().nullable(), previous: z.number().finite().nullable(), actual: z.number().finite().nullable(), notes: z.string().max(1000).nullable() }))
   .handler(async ({ data, context }) => {
-    const result = await context.supabase.from("event_dates").upsert(data, { onConflict: "event_id,ts" });
+    const { id: _id, ...rest } = data;
+    const result = await context.supabase.from("event_dates").upsert(rest, { onConflict: "event_id,ts" });
     if (result.error) throw new Error(result.error.message);
     return { ok: true };
   });
+export const getEventsView = createServerFn({ method: "GET" }).middleware([requireSupabaseAuth]).handler(async ({ context }) => {
+  const { buildSnapshot } = await import("./analysis");
+  const [base, snap] = await Promise.all([loadEvents(context.supabase), buildSnapshot(context.supabase as any)]);
+  const sentiment = Object.fromEntries(snap.instruments.map((i) => [i.id, { s6: i.sent6, s24: i.sent24 }]));
+  const out = { ...base, upcoming: snap.upcoming, sentiment, now: snap.now };
+  return JSON.parse(JSON.stringify(out)) as typeof out;
+});
