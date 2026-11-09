@@ -233,6 +233,10 @@ const FEEDS = [
   ),
   "https://oilprice.com/rss/main",
   "https://www.fxstreet.com/rss/news",
+  // Bing News RSS as a second free source (Google News can be slow from the host).
+  ...["crude oil price", "OPEC oil", "silver price", "gold price"].map(
+    (q) => `https://www.bing.com/news/search?q=${encodeURIComponent(q)}&format=rss`,
+  ),
 ];
 
 function decode(s: string) {
@@ -263,7 +267,7 @@ export async function fetchNews(db: DB, opts: { all?: boolean } = {}) {
     source: string;
     published_at: string;
   }[] = [];
-  const per = 3;
+  const per = 4;
   const cur = opts.all ? null : ((await getState<{ cursor?: number }>(db, "news")).cursor ?? 0);
   const feeds =
     cur == null ? FEEDS : Array.from({ length: per }, (_, k) => FEEDS[(cur + k) % FEEDS.length]);
@@ -271,9 +275,8 @@ export async function fetchNews(db: DB, opts: { all?: boolean } = {}) {
   await Promise.all(
     feeds.map(async (f) => {
       const host = new URL(f).hostname.replace("www.", "");
-      const label = host.includes("google")
-        ? `google:${new URL(f).searchParams.get("q") ?? ""}`
-        : host;
+      const q = new URL(f).searchParams.get("q");
+      const label = q ? `${host.split(".").at(-2)}:${q}` : host;
       try {
         const r = await fetch(f, {
           headers: {
@@ -281,7 +284,7 @@ export async function fetchNews(db: DB, opts: { all?: boolean } = {}) {
             Accept: "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5",
             "Accept-Language": "en-US,en;q=0.9",
           },
-          signal: AbortSignal.timeout(3000),
+          signal: AbortSignal.timeout(f.includes("google") ? 8000 : 5000),
         });
         if (!r.ok) {
           report.push({ feed: label, result: `HTTP ${r.status}` });
