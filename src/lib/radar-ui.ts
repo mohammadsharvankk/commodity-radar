@@ -1,5 +1,5 @@
 export function radarHead(page: string, description: string) {
-  const title = `Commodity Radar — ${page}`;
+  const title = `${page} · Stock Radar by Sharvan`;
   return { meta: [{ title }, { name: "description", content: description }, { property: "og:title", content: title }, { property: "og:description", content: description }, { property: "og:type", content: "website" }, { name: "twitter:card", content: "summary" }] };
 }
 export function price(value: number | null | undefined, decimals = 2) {

@@ -11,15 +11,15 @@ export function useClock(initial = 0) {
   useEffect(() => { setNow(Date.now()); const t = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(t); }, []);
   return now;
 }
-export function PageTitle({ title, subtitle, children }: { title: string; subtitle: string; children?: React.ReactNode }) {
-  return <div className="mb-6 flex flex-wrap items-end justify-between gap-4"><div><div className="mb-2 flex items-center gap-2 text-xs text-primary"><Activity className="size-3.5" /> PERSONAL MARKET INTELLIGENCE</div><h1 className="text-2xl font-semibold md:text-3xl">{title}</h1><p className="mt-1 text-sm text-muted-foreground">{subtitle}</p></div>{children}</div>;
+export function PageTitle({ title, children }: { title: string; subtitle?: string; children?: React.ReactNode }) {
+  return <div className="mb-5 flex flex-wrap items-center justify-between gap-3"><h1 className="text-xl font-semibold tracking-tight md:text-2xl">{title}</h1>{children}</div>;
 }
 export function RefreshButton() {
   const router = useRouter(); const [busy, setBusy] = useState(false);
   return <Button variant="outline" size="sm" disabled={busy} onClick={async () => { setBusy(true); try { await router.invalidate({ sync: true }); } finally { setBusy(false); } }}><RefreshCw className={busy ? "animate-spin" : ""} />Refresh</Button>;
 }
 export function Empty({ title, message }: { title: string; message: string }) {
-  return <div className="border-y border-border py-12 text-center"><Activity className="mx-auto mb-3 size-7 text-muted-foreground" /><h2 className="font-medium">{title}</h2><p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">{message}</p></div>;
+  return <div className="panel px-6 py-10 text-center"><h2 className="font-medium">{title}</h2><p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">{message}</p></div>;
 }
 export function LoadError({ error }: { error: unknown }) {
   return <div className="py-12"><h1 className="text-xl">Unable to load market data</h1><p role="alert" className="my-4 text-muted-foreground">{error instanceof Error ? error.message : "Please try again."}</p><RefreshButton /></div>;

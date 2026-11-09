@@ -155,7 +155,7 @@ function UpcomingCard({
       <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="font-medium">{u.event.name}</h3>
         <span className={`num text-sm ${past ? "text-muted-foreground" : "text-warn"}`}>
-          {past ? "RELEASED" : `IN ${fmtCountdown(u.ts - now)}`}
+          {past ? "Released" : `in ${fmtCountdown(u.ts - now)}`}
         </span>
       </div>
       <p className="mb-3 text-xs text-muted-foreground">

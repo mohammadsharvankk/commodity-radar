@@ -65,7 +65,7 @@ export const sendTestAlert = createServerFn({ method: "POST" })
   .handler(async () => {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { sendWhatsApp } = await import("./jobs.server");
-    const msg = "✅ Commodity Radar test alert — WhatsApp alerts are working.";
+    const msg = "✅ Stock Radar test alert — WhatsApp alerts are working.";
     try {
       await sendWhatsApp(msg, supabaseAdmin);
       await supabaseAdmin.from("alerts").insert({ type: "test", message: msg, status: "sent" });
