@@ -216,25 +216,21 @@ export async function cacheReactions(db: DB, instId: string, c1h?: Candle[]) {
 // ---------------- News (free RSS) ----------------
 // NOTE: a social feed (e.g. X/Twitter, Reddit) could be added here later as another source
 // returning {title,url,source,published}. X's API is paid, so it's intentionally not included.
-const GOOGLE_QUERIES = [
-  "crude oil",
-  "WTI",
+// Google News RSS answers 503 / times out from the hosting provider, so headlines come
+// from Bing News RSS searches plus two direct publisher feeds.
+const NEWS_QUERIES = [
+  "crude oil price",
+  "WTI oil",
   "OPEC",
-  "Strait of Hormuz",
+  "Strait of Hormuz oil",
   "silver price",
   "gold price",
-  "Federal Reserve",
-  "precious metals",
+  "Federal Reserve rates",
 ];
 const FEEDS = [
-  ...GOOGLE_QUERIES.map(
-    (q) =>
-      `https://news.google.com/rss/search?q=${encodeURIComponent(q + " when:1d")}&hl=en-US&gl=US&ceid=US:en`,
-  ),
   "https://oilprice.com/rss/main",
   "https://www.fxstreet.com/rss/news",
-  // Bing News RSS as a second free source (Google News can be slow from the host).
-  ...["crude oil price", "OPEC oil", "silver price", "gold price"].map(
+  ...NEWS_QUERIES.map(
     (q) => `https://www.bing.com/news/search?q=${encodeURIComponent(q)}&format=rss`,
   ),
 ];
@@ -284,7 +280,7 @@ export async function fetchNews(db: DB, opts: { all?: boolean } = {}) {
             Accept: "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5",
             "Accept-Language": "en-US,en;q=0.9",
           },
-          signal: AbortSignal.timeout(f.includes("google") ? 8000 : 5000),
+          signal: AbortSignal.timeout(6000),
         });
         if (!r.ok) {
           report.push({ feed: label, result: `HTTP ${r.status}` });
