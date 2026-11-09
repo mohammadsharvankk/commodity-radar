@@ -224,6 +224,7 @@ const GOOGLE_QUERIES = [
   "silver price",
   "gold price",
   "Federal Reserve",
+  "precious metals",
 ];
 const FEEDS = [
   ...GOOGLE_QUERIES.map(
@@ -232,7 +233,6 @@ const FEEDS = [
   ),
   "https://oilprice.com/rss/main",
   "https://www.fxstreet.com/rss/news",
-  "https://www.kitco.com/rss/KitcoNews.xml",
 ];
 
 function decode(s: string) {
