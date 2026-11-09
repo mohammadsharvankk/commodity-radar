@@ -251,7 +251,11 @@ const tag = (x: string, t: string) => {
   return m ? decode(m[1]) : "";
 };
 
-export async function fetchNews(db: DB) {
+/**
+ * Fetches a few feeds per run (rotating) so each scheduled run stays short.
+ * Pass `all` to fetch every feed (manual button).
+ */
+export async function fetchNews(db: DB, opts: { all?: boolean } = {}) {
   const items: {
     url: string;
     title: string;
@@ -259,17 +263,25 @@ export async function fetchNews(db: DB) {
     source: string;
     published_at: string;
   }[] = [];
+  const per = 4;
+  const cur = opts.all ? null : ((await getState<{ cursor?: number }>(db, "news")).cursor ?? 0);
+  const feeds =
+    cur == null ? FEEDS : Array.from({ length: per }, (_, k) => FEEDS[(cur + k) % FEEDS.length]);
+  if (cur != null) await setState(db, "news", { cursor: (cur + per) % FEEDS.length });
   await Promise.all(
-    FEEDS.map(async (f) => {
+    feeds.map(async (f) => {
       try {
         const r = await fetch(f, {
           headers: { "User-Agent": UA },
-          signal: AbortSignal.timeout(6000),
+          signal: AbortSignal.timeout(4000),
         });
         if (!r.ok) return;
         const xml = await r.text();
         const host = new URL(f).hostname.replace("www.", "");
-        for (const it of xml.split(/<item[\s>]/i).slice(1, 26)) {
+        for (const it of xml
+          .slice(0, 400_000)
+          .split(/<item[\s>]/i)
+          .slice(1, 21)) {
           let title = tag(it, "title");
           const url = tag(it, "link") || tag(it, "guid");
           if (!title || !url) continue;

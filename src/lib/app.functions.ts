@@ -14,7 +14,12 @@ export const getSnapshot = createServerFn({ method: "GET" })
 export const getDetail = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: { id: string; tf: string }) =>
-    z.object({ id: z.enum(INSTRUMENT_IDS as [string, ...string[]]), tf: z.enum(["15m", "1h", "4h", "1d"]) }).parse(d),
+    z
+      .object({
+        id: z.enum(INSTRUMENT_IDS as [string, ...string[]]),
+        tf: z.enum(["15m", "1h", "4h", "1d"]),
+      })
+      .parse(d),
   )
   .handler(async ({ data, context }) => {
     const db = context.supabase as any;
@@ -33,14 +38,20 @@ export const getPatterns = createServerFn({ method: "GET" })
 
 export const getNewsFeed = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
-  .handler(async ({ context }) => loadNews(context.supabase as any, Date.now() - 3 * 86400_000, 300));
+  .handler(async ({ context }) =>
+    loadNews(context.supabase as any, Date.now() - 3 * 86400_000, 300),
+  );
 
 export const getJobStatus = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
     const { data } = await context.supabase.from("job_state").select("key,value,updated_at");
     return {
-      state: (data ?? []).filter((r) => !r.key.startsWith("lock:")) as { key: string; value: any; updated_at: string }[],
+      state: (data ?? []).filter((r) => !r.key.startsWith("lock:")) as {
+        key: string;
+        value: any;
+        updated_at: string;
+      }[],
       secretsSet: !!process.env.CALLMEBOT_PHONE && !!process.env.CALLMEBOT_APIKEY,
     };
   });
@@ -66,17 +77,24 @@ export const sendTestAlert = createServerFn({ method: "POST" })
 export const runJobNow = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: { job: string; instrument?: string }) =>
-    z.object({ job: z.enum(["prices", "news", "tag", "stats", "backfill"]), instrument: z.enum(INSTRUMENT_IDS as [string, ...string[]]).optional() }).parse(d),
+    z
+      .object({
+        job: z.enum(["prices", "news", "tag", "stats", "backfill"]),
+        instrument: z.enum(INSTRUMENT_IDS as [string, ...string[]]).optional(),
+      })
+      .parse(d),
   )
   .handler(async ({ data }) => {
     const { supabaseAdmin: db } = await import("@/integrations/supabase/client.server");
     const j = await import("./jobs.server");
     try {
       if (data.job === "prices") await j.pollPrices(db);
-      if (data.job === "news") await j.fetchNews(db);
+      if (data.job === "news") await j.fetchNews(db, { all: true });
       if (data.job === "tag") await j.tagNews(db);
       if (data.job === "stats") await j.recomputeStats(db);
-      if (data.job === "backfill") for (const id of data.instrument ? [data.instrument] : INSTRUMENT_IDS) await j.backfillInstrument(db, id);
+      if (data.job === "backfill")
+        for (const id of data.instrument ? [data.instrument] : INSTRUMENT_IDS)
+          await j.backfillInstrument(db, id);
       return { ok: true, error: null as string | null };
     } catch (e) {
       return { ok: false, error: (e as Error).message };
