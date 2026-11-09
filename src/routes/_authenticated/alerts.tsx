@@ -3,7 +3,7 @@ import { queryOptions, useQueryClient, useSuspenseQuery } from "@tanstack/react-
 import { useServerFn } from "@tanstack/react-start";
 import { useState } from "react";
 import { CheckCircle2, CircleAlert, Play, Send } from "lucide-react";
-import { getJobStatus, runJobNow, sendTestAlert } from "@/lib/app.functions";
+import { getJobStatus, runJobNow, saveWhatsApp, sendTestAlert } from "@/lib/app.functions";
 import { getAlerts, getSettings, saveSettings } from "@/lib/manage.functions";
 import { ALERT_TYPES, INSTRUMENT_IDS } from "@/lib/instruments";
 import { radarHead } from "@/lib/radar-ui";
@@ -85,13 +85,10 @@ function WhatsAppSection() {
           <span className="num text-foreground">I allow callmebot to send me messages</span>
         </li>
         <li>Wait up to 2 minutes for the reply with your API key.</li>
-        <li>
-          In Lovable: Project settings → Secrets, add{" "}
-          <span className="num text-foreground">CALLMEBOT_PHONE</span> (e.g. 9715XXXXXXXX, no +) and{" "}
-          <span className="num text-foreground">CALLMEBOT_APIKEY</span>.
-        </li>
+        <li>Enter your WhatsApp number and that key below, then Save.</li>
         <li>Press Send test alert.</li>
       </ol>
+      <WhatsAppForm current={data.whatsappPhone} />
       <Button
         size="sm"
         disabled={busy}
@@ -116,6 +113,67 @@ function WhatsAppSection() {
         </p>
       )}
     </section>
+  );
+}
+
+function WhatsAppForm({ current }: { current: string | null }) {
+  const save = useServerFn(saveWhatsApp);
+  const qc = useQueryClient();
+  const [phone, setPhone] = useState("");
+  const [apikey, setApikey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  return (
+    <form
+      className="mb-4 grid gap-3 sm:grid-cols-2"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setBusy(true);
+        setMsg("");
+        try {
+          await save({ data: { phone, apikey } });
+          setApikey("");
+          setMsg("Saved. Now press Send test alert.");
+          await qc.invalidateQueries({ queryKey: ["job-status"] });
+        } catch (err) {
+          setMsg(err instanceof Error ? err.message : "Save failed");
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      <label className="text-xs">
+        WhatsApp number (with country code)
+        <Input
+          className="mt-1"
+          inputMode="tel"
+          placeholder={current ?? "9715XXXXXXXX"}
+          required
+          value={phone}
+          onChange={(e) => setPhone(e.target.value)}
+        />
+      </label>
+      <label className="text-xs">
+        CallMeBot API key
+        <Input
+          className="mt-1"
+          autoComplete="off"
+          required
+          value={apikey}
+          onChange={(e) => setApikey(e.target.value)}
+        />
+      </label>
+      <div className="flex items-center gap-3 sm:col-span-2">
+        <Button size="sm" variant="outline" disabled={busy}>
+          {busy ? "Saving…" : current ? "Update WhatsApp details" : "Save WhatsApp details"}
+        </Button>
+        {msg && (
+          <span role="status" className="text-xs text-muted-foreground">
+            {msg}
+          </span>
+        )}
+      </div>
+    </form>
   );
 }
 

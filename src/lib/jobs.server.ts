@@ -443,11 +443,31 @@ export async function tagNews(db: DB) {
 }
 
 // ---------------- WhatsApp via CallMeBot ----------------
-export async function sendWhatsApp(text: string) {
+/**
+ * CallMeBot credentials: project secrets (CALLMEBOT_PHONE / CALLMEBOT_APIKEY) if set,
+ * otherwise the values saved from the in-app Alerts page (job_state key "whatsapp",
+ * readable only by the signed-in owner and the server).
+ */
+export async function whatsAppCreds(db?: DB): Promise<{ phone: string; apikey: string } | null> {
   const phone = process.env.CALLMEBOT_PHONE;
   const apikey = process.env.CALLMEBOT_APIKEY;
-  if (!phone || !apikey) throw new Error("CALLMEBOT_PHONE / CALLMEBOT_APIKEY secrets are not set");
-  const url = `https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(text)}&apikey=${encodeURIComponent(apikey)}`;
+  if (phone && apikey) return { phone, apikey };
+  const client = db ?? (await import("@/integrations/supabase/client.server")).supabaseAdmin;
+  const v = await getState<{ phone?: string; apikey?: string }>(client, "whatsapp");
+  return v.phone && v.apikey ? { phone: v.phone, apikey: v.apikey } : null;
+}
+
+export async function saveWhatsAppCreds(db: DB, phone: string, apikey: string) {
+  await setState(db, "whatsapp", { phone, apikey });
+}
+
+export async function sendWhatsApp(text: string, db?: DB) {
+  const creds = await whatsAppCreds(db);
+  if (!creds)
+    throw new Error(
+      "WhatsApp is not set up yet (add your number and CallMeBot key on the Alerts page)",
+    );
+  const url = `https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(creds.phone)}&text=${encodeURIComponent(text)}&apikey=${encodeURIComponent(creds.apikey)}`;
   const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
   const body = await r.text();
   if (!r.ok || /error|invalid/i.test(body.slice(0, 300)))
@@ -510,7 +530,7 @@ async function emit(
   if (error) return; // duplicate dedupe key => already handled
   if (quiet) return;
   try {
-    await sendWhatsApp(message);
+    await sendWhatsApp(message, db);
     await db.from("alerts").update({ status: "sent" }).eq("dedupe_key", dedupe);
   } catch (e) {
     await db

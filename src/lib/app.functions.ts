@@ -46,13 +46,17 @@ export const getJobStatus = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
     const { data } = await context.supabase.from("job_state").select("key,value,updated_at");
+    const wa = (data ?? []).find((r) => r.key === "whatsapp")?.value as
+      { phone?: string; apikey?: string } | undefined;
+    const envSet = !!process.env.CALLMEBOT_PHONE && !!process.env.CALLMEBOT_APIKEY;
     return {
-      state: (data ?? []).filter((r) => !r.key.startsWith("lock:")) as {
+      whatsappPhone: envSet ? "(project secret)" : wa?.phone ? `••••${wa.phone.slice(-4)}` : null,
+      state: (data ?? []).filter((r) => !r.key.startsWith("lock:") && r.key !== "whatsapp") as {
         key: string;
         value: any;
         updated_at: string;
       }[],
-      secretsSet: !!process.env.CALLMEBOT_PHONE && !!process.env.CALLMEBOT_APIKEY,
+      secretsSet: envSet || !!(wa?.phone && wa?.apikey),
     };
   });
 
@@ -63,7 +67,7 @@ export const sendTestAlert = createServerFn({ method: "POST" })
     const { sendWhatsApp } = await import("./jobs.server");
     const msg = "✅ Commodity Radar test alert — WhatsApp alerts are working.";
     try {
-      await sendWhatsApp(msg);
+      await sendWhatsApp(msg, supabaseAdmin);
       await supabaseAdmin.from("alerts").insert({ type: "test", message: msg, status: "sent" });
       return { ok: true as const, error: null };
     } catch (e) {
@@ -99,4 +103,24 @@ export const runJobNow = createServerFn({ method: "POST" })
     } catch (e) {
       return { ok: false, error: (e as Error).message };
     }
+  });
+
+export const saveWhatsApp = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: { phone: string; apikey: string }) =>
+    z
+      .object({
+        phone: z
+          .string()
+          .transform((v) => v.replace(/[^0-9]/g, ""))
+          .pipe(z.string().min(8, "Enter the full number with country code").max(15)),
+        apikey: z.string().trim().min(3, "Enter the API key from CallMeBot").max(64),
+      })
+      .parse(d),
+  )
+  .handler(async ({ data }) => {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { saveWhatsAppCreds } = await import("./jobs.server");
+    await saveWhatsAppCreds(supabaseAdmin, data.phone, data.apikey);
+    return { ok: true };
   });
