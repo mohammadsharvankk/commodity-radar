@@ -263,7 +263,7 @@ export async function fetchNews(db: DB, opts: { all?: boolean } = {}) {
     source: string;
     published_at: string;
   }[] = [];
-  const per = 4;
+  const per = 3;
   const cur = opts.all ? null : ((await getState<{ cursor?: number }>(db, "news")).cursor ?? 0);
   const feeds =
     cur == null ? FEEDS : Array.from({ length: per }, (_, k) => FEEDS[(cur + k) % FEEDS.length]);
@@ -273,7 +273,7 @@ export async function fetchNews(db: DB, opts: { all?: boolean } = {}) {
       try {
         const r = await fetch(f, {
           headers: { "User-Agent": UA },
-          signal: AbortSignal.timeout(4000),
+          signal: AbortSignal.timeout(3000),
         });
         if (!r.ok) return;
         const xml = await r.text();
@@ -363,7 +363,7 @@ export async function tagNews(db: DB) {
     .select("id,title,source")
     .eq("tagged", false)
     .order("published_at", { ascending: false })
-    .limit(15);
+    .limit(10);
   if (!rows?.length) return { tagged: 0 };
   const key = process.env.LOVABLE_API_KEY;
   if (!key) throw new Error("LOVABLE_API_KEY missing");
