@@ -23,6 +23,7 @@ import {
   sessionWindows,
   tradingDayOf,
   tzParts,
+  zonedToUtc,
 } from "./time";
 
 type DB = SupabaseClient<Database>;
@@ -660,6 +661,9 @@ export async function runAlerts(db: DB, now = Date.now()) {
     }
   }
 
+  // 8) EIA Wednesday setup (WTI) + outcome log
+  await eiaWednesday(db, s, now);
+
   // 6) Strong news
   const { data: strong } = await db
     .from("news")
@@ -686,6 +690,81 @@ export async function runAlerts(db: DB, now = Date.now()) {
         now,
       );
     }
+  }
+}
+
+// ---------------- EIA Wednesday setup ----------------
+/**
+ * Backtest (2y of hourly WTI): on EIA Wednesdays, when WTI moved > 0.5% between the
+ * NY 08:00 open and 10:00, the 10:00–11:00 report hour moved against that morning move
+ * 58% of the time (avg pullback ~0.25%), but by the NY close the morning direction had
+ * usually resumed. Alert once between 10:00 and 10:30 NY, and log every Wednesday so the
+ * pattern can be checked live.
+ */
+export interface EiaLogEntry {
+  date: string;
+  morning: number; // % move NY 08:00 → alert time
+  big: boolean;
+  alerted: boolean;
+  reportHour?: number; // % move of the 10:00–11:00 NY candle
+  toClose?: number; // % move 10:00 → 16:00 NY close
+  pulledBack?: boolean; // report hour went against the morning move
+  resumed?: boolean; // by the close, price was back in the morning direction vs 10:00
+}
+
+async function eiaWednesday(db: DB, s: Settings, now: number) {
+  const ny = tzParts(now, NY_TZ);
+  const date = `${ny.y}-${String(ny.m).padStart(2, "0")}-${String(ny.d).padStart(2, "0")}`;
+  const log = await getState<Record<string, EiaLogEntry>>(db, "eia_log");
+  let changed = false;
+
+  // a) Setup alert: Wednesday, 10:00–10:30 NY (before the 10:30 release)
+  if (ny.wd === 3 && ny.h === 10 && ny.mi < 30 && !log[date]) {
+    const open8 = zonedToUtc(ny.y, ny.m, ny.d, 8, 0, NY_TZ);
+    const c = await loadCandles(db, "WTI", "15m", open8);
+    const first = c.find((k) => k.t >= open8);
+    const last = c.at(-1);
+    if (first && last && last.t > first.t) {
+      const morning = ((last.c - first.o) / first.o) * 100;
+      const big = Math.abs(morning) > 0.5;
+      log[date] = { date, morning, big, alerted: false };
+      if (big && alertEnabled(s, "eiasetup", "WTI")) {
+        const dir = morning > 0 ? "up" : "down";
+        const against = morning > 0 ? "down" : "up";
+        await emit(
+          db,
+          s,
+          "eiasetup",
+          "WTI",
+          `eia:${date}`,
+          `🛢 WTI | EIA at ${fmtDubaiTime(zonedToUtc(ny.y, ny.m, ny.d, 10, 30, NY_TZ))} Dubai | Morning ${dir} ${sgn(morning)} since NY open | Backtest: big pre-EIA moves saw a report-hour spike ${against} 58% of the time, then the ${dir} move usually resumed by the close. Watch for a liquidity grab, not a reversal.`,
+          now,
+        );
+        log[date].alerted = true;
+      }
+      changed = true;
+    }
+  }
+
+  // b) Outcome: once the NY session is over, fill in what happened
+  for (const e of Object.values(log)) {
+    if (e.reportHour != null) continue;
+    const [y, m, d] = e.date.split("-").map(Number);
+    const closeT = zonedToUtc(y, m, d, 16, 0, NY_TZ);
+    if (now < closeT + 60 * MIN) continue;
+    const h = await loadCandles(db, "WTI", "1h", zonedToUtc(y, m, d, 10, 0, NY_TZ));
+    const r10 = h.find((k) => k.t === zonedToUtc(y, m, d, 10, 0, NY_TZ));
+    const r15 = h.filter((k) => k.t <= zonedToUtc(y, m, d, 15, 0, NY_TZ)).at(-1);
+    if (!r10 || !r15) continue;
+    e.reportHour = ((r10.c - r10.o) / r10.o) * 100;
+    e.toClose = ((r15.c - r10.o) / r10.o) * 100;
+    e.pulledBack = Math.sign(e.reportHour) === -Math.sign(e.morning);
+    e.resumed = Math.sign(e.toClose) === Math.sign(e.morning);
+    changed = true;
+  }
+  if (changed) {
+    const keep = Object.fromEntries(Object.entries(log).sort().slice(-60));
+    await setState(db, "eia_log", keep);
   }
 }
 

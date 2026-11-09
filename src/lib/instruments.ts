@@ -30,6 +30,7 @@ export const ALERT_TYPES = [
   { id: "postreport", label: "Post-report reaction summary" },
   { id: "news", label: "Strong news (impact ≥ 4)" },
   { id: "biasflip", label: "Bias flip" },
+  { id: "eiasetup", label: "EIA Wednesday setup (big pre-report move)" },
 ] as const;
 export type AlertTypeId = (typeof ALERT_TYPES)[number]["id"];
 

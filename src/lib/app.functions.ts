@@ -124,3 +124,27 @@ export const saveWhatsApp = createServerFn({ method: "POST" })
     await saveWhatsAppCreds(supabaseAdmin, data.phone, data.apikey);
     return { ok: true };
   });
+
+export const getEiaLog = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const { data } = await context.supabase
+      .from("job_state")
+      .select("value")
+      .eq("key", "eia_log")
+      .maybeSingle();
+    const log = (data?.value ?? {}) as Record<
+      string,
+      {
+        date: string;
+        morning: number;
+        big: boolean;
+        alerted: boolean;
+        reportHour?: number;
+        toClose?: number;
+        pulledBack?: boolean;
+        resumed?: boolean;
+      }
+    >;
+    return Object.values(log).sort((a, b) => b.date.localeCompare(a.date));
+  });
