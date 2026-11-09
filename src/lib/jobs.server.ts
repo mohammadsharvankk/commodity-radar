@@ -267,17 +267,28 @@ export async function fetchNews(db: DB, opts: { all?: boolean } = {}) {
   const cur = opts.all ? null : ((await getState<{ cursor?: number }>(db, "news")).cursor ?? 0);
   const feeds =
     cur == null ? FEEDS : Array.from({ length: per }, (_, k) => FEEDS[(cur + k) % FEEDS.length]);
-  if (cur != null) await setState(db, "news", { cursor: (cur + per) % FEEDS.length });
+  const report: { feed: string; result: string }[] = [];
   await Promise.all(
     feeds.map(async (f) => {
+      const host = new URL(f).hostname.replace("www.", "");
+      const label = host.includes("google")
+        ? `google:${new URL(f).searchParams.get("q") ?? ""}`
+        : host;
       try {
         const r = await fetch(f, {
-          headers: { "User-Agent": UA },
+          headers: {
+            "User-Agent": UA,
+            Accept: "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5",
+            "Accept-Language": "en-US,en;q=0.9",
+          },
           signal: AbortSignal.timeout(3000),
         });
-        if (!r.ok) return;
+        if (!r.ok) {
+          report.push({ feed: label, result: `HTTP ${r.status}` });
+          return;
+        }
         const xml = await r.text();
-        const host = new URL(f).hostname.replace("www.", "");
+        const before = items.length;
         for (const it of xml
           .slice(0, 400_000)
           .split(/<item[\s>]/i)
@@ -305,8 +316,9 @@ export async function fetchNews(db: DB, opts: { all?: boolean } = {}) {
             published_at: new Date(pd || Date.now()).toISOString(),
           });
         }
-      } catch {
-        /* feed unreachable — skip */
+        report.push({ feed: label, result: `${items.length - before} items` });
+      } catch (e) {
+        report.push({ feed: label, result: `error: ${(e as Error).message.slice(0, 80)}` });
       }
     }),
   );
@@ -339,6 +351,13 @@ export async function fetchNews(db: DB, opts: { all?: boolean } = {}) {
         if (!(await db.from("news").insert(row)).error) inserted++;
     } else inserted = fresh.length;
   }
+  await setState(db, "news", {
+    cursor: cur == null ? 0 : (cur + per) % FEEDS.length,
+    at: new Date().toISOString(),
+    report,
+    fetched: uniq.length,
+    inserted,
+  });
   return { fetched: uniq.length, inserted };
 }
 
