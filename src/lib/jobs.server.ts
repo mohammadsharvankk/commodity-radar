@@ -470,15 +470,13 @@ async function emit(
   const { count } = await q;
   if ((count ?? 0) > 0) return;
   const quiet = inQuiet(s, now);
-  const { error } = await db
-    .from("alerts")
-    .insert({
-      type,
-      instrument: inst,
-      dedupe_key: dedupe,
-      message,
-      status: quiet ? "quiet" : "pending",
-    });
+  const { error } = await db.from("alerts").insert({
+    type,
+    instrument: inst,
+    dedupe_key: dedupe,
+    message,
+    status: quiet ? "quiet" : "pending",
+  });
   if (error) return; // duplicate dedupe key => already handled
   if (quiet) return;
   try {
