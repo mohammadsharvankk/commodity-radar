@@ -30,7 +30,12 @@ import { currentSession, type SessionName } from "./time";
 
 type DB = SupabaseClient<Database>;
 
-export async function loadCandles(db: DB, inst: string, tf: string, sinceMs: number): Promise<Candle[]> {
+export async function loadCandles(
+  db: DB,
+  inst: string,
+  tf: string,
+  sinceMs: number,
+): Promise<Candle[]> {
   const out: Candle[] = [];
   const page = 1000;
   for (let from = 0; ; from += page) {
@@ -44,7 +49,14 @@ export async function loadCandles(db: DB, inst: string, tf: string, sinceMs: num
       .range(from, from + page - 1);
     if (error) throw new Error(error.message);
     for (const r of data ?? [])
-      out.push({ t: new Date(r.ts).getTime(), o: r.open, h: r.high, l: r.low, c: r.close, v: r.volume });
+      out.push({
+        t: new Date(r.ts).getTime(),
+        o: r.open,
+        h: r.high,
+        l: r.low,
+        c: r.close,
+        v: r.volume,
+      });
     if (!data || data.length < page) break;
   }
   return out;
@@ -75,7 +87,8 @@ export async function loadStats(db: DB) {
   const { data, error } = await db.from("pattern_stats").select("instrument,data,computed_at");
   if (error) throw new Error(error.message);
   const m: Record<string, { stats: PatternStats; computed_at: string }> = {};
-  for (const r of data ?? []) m[r.instrument] = { stats: r.data as unknown as PatternStats, computed_at: r.computed_at };
+  for (const r of data ?? [])
+    m[r.instrument] = { stats: r.data as unknown as PatternStats, computed_at: r.computed_at };
   return m;
 }
 
@@ -118,9 +131,20 @@ export async function buildSnapshot(db: DB, now = Date.now()): Promise<Snapshot>
     loadStats(db),
     loadEvents(db),
     loadNews(db, now - d),
-    db.from("job_state").select("key,value").in("key", ["poll"]),
+    db
+      .from("job_state")
+      .select("key,value")
+      .in("key", ["poll", ...INSTRUMENTS.map((i) => `reactions:${i.id}`)]),
   ]);
-  const poll = (jobRes.data?.[0]?.value ?? {}) as { lastPrice?: number; backfill?: Record<string, boolean> };
+  const jobRows = jobRes.data ?? [];
+  const poll = (jobRows.find((r) => r.key === "poll")?.value ?? {}) as {
+    lastPrice?: number;
+    backfill?: Record<string, boolean>;
+  };
+  const cachedReactions: Record<string, Record<string, Reaction | null>> = {};
+  for (const r of jobRows)
+    if (r.key.startsWith("reactions:"))
+      cachedReactions[r.key.slice(10)] = (r.value ?? {}) as Record<string, Reaction | null>;
 
   const perInst = await Promise.all(
     INSTRUMENTS.map(async (inst) => {
@@ -137,11 +161,14 @@ export async function buildSnapshot(db: DB, now = Date.now()): Promise<Snapshot>
   const upcoming: UpcomingEvent[] = [];
   const longH: Record<string, Candle[]> = {};
   const enabled = events.filter((e) => e.enabled);
-  const occ = enabled.flatMap((e) => occurrences(e, dates, now - 70 * 60_000, now + 7 * d).map((ts) => ({ e, ts })));
+  const occ = enabled.flatMap((e) =>
+    occurrences(e, dates, now - 70 * 60_000, now + 7 * d).map((ts) => ({ e, ts })),
+  );
   occ.sort((a, b) => a.ts - b.ts);
   const soon = occ.slice(0, 12);
   if (soon.length) {
-    const need = new Set(soon.flatMap((o) => o.e.instruments));
+    // Prefer reactions cached by the daily stats job; only load long history if no cache yet.
+    const need = new Set(soon.flatMap((o) => o.e.instruments).filter((id) => !cachedReactions[id]));
     await Promise.all(
       [...need].map(async (id) => {
         longH[id] = await loadCandles(db, id, "1h", now - 400 * d);
@@ -150,7 +177,11 @@ export async function buildSnapshot(db: DB, now = Date.now()): Promise<Snapshot>
   }
   for (const { e, ts } of soon) {
     const reactions: Record<string, Reaction | null> = {};
-    for (const id of e.instruments) reactions[id] = eventReaction(e, dates, longH[id] ?? [], now);
+    for (const id of e.instruments)
+      reactions[id] =
+        cachedReactions[id] && e.id in cachedReactions[id]
+          ? cachedReactions[id][e.id]
+          : eventReaction(e, dates, longH[id] ?? [], now);
     const date = dates.find((x) => x.event_id === e.id && new Date(x.ts).getTime() === ts) ?? null;
     upcoming.push({ event: e, ts, date, reactions });
   }
@@ -170,14 +201,22 @@ export async function buildSnapshot(db: DB, now = Date.now()): Promise<Snapshot>
     const sent6 = sentimentFor(news, inst.id, now - 6 * 3600_000);
     const sent24 = sentimentFor(news, inst.id, now - d);
     const next = upcoming.find(
-      (u) => u.ts > now && u.ts - now < 6 * 3600_000 && u.event.impact >= 4 && u.event.instruments.includes(inst.id),
+      (u) =>
+        u.ts > now &&
+        u.ts - now < 6 * 3600_000 &&
+        u.event.impact >= 4 &&
+        u.event.instruments.includes(inst.id),
     );
     const bias = computeBias({
       trends,
       headsUp,
       sent24,
       nearEvent: next
-        ? { name: next.event.name, inMin: Math.round((next.ts - now) / 60000), reaction: next.reactions[inst.id] }
+        ? {
+            name: next.event.name,
+            inMin: Math.round((next.ts - now) / 60000),
+            reaction: next.reactions[inst.id],
+          }
         : null,
     });
     const recentH = c1h.slice(-24 * 20);
@@ -188,7 +227,8 @@ export async function buildSnapshot(db: DB, now = Date.now()): Promise<Snapshot>
       id: inst.id,
       last,
       lastTs: lastC?.t ?? null,
-      changePct: last && levels.dailyOpen ? ((last - levels.dailyOpen) / levels.dailyOpen) * 100 : null,
+      changePct:
+        last && levels.dailyOpen ? ((last - levels.dailyOpen) / levels.dailyOpen) * 100 : null,
       spark: (c15.length ? c15 : c1h).slice(-64).map((c) => c.c),
       trends,
       session: currentSession(now),

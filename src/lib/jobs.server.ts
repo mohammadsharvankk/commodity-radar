@@ -5,9 +5,25 @@ import { z } from "zod";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { buildSnapshot, loadCandles, loadStats } from "./analysis";
-import { computePatternStats, reactionText } from "./engine";
+import {
+  computePatternStats,
+  eventReaction,
+  reactionText,
+  type Candle,
+  type EventDateRow,
+  type EventRow,
+  type Reaction,
+} from "./engine";
 import { INSTRUMENTS, NY_TZ, getInstrument, type AlertTypeId } from "./instruments";
-import { currentSession, fmtDubaiTime, isMarketOpen, keyTimesAround, sessionWindows, tradingDayOf, tzParts } from "./time";
+import {
+  currentSession,
+  fmtDubaiTime,
+  isMarketOpen,
+  keyTimesAround,
+  sessionWindows,
+  tradingDayOf,
+  tzParts,
+} from "./time";
 
 type DB = SupabaseClient<Database>;
 const MIN = 60_000;
@@ -49,7 +65,12 @@ async function yahoo(symbol: string, interval: string, range: string) {
   throw new Error(`Yahoo ${symbol} ${interval}: ${lastErr}`);
 }
 
-async function upsertCandles(db: DB, inst: string, tf: string, rows: Awaited<ReturnType<typeof yahoo>>) {
+async function upsertCandles(
+  db: DB,
+  inst: string,
+  tf: string,
+  rows: Awaited<ReturnType<typeof yahoo>>,
+) {
   const mapped = rows.map((r) => ({
     instrument: inst,
     timeframe: tf,
@@ -84,6 +105,9 @@ async function setState(db: DB, key: string, value: unknown) {
 }
 
 interface PollState {
+  lastDaily?: number;
+  statsDone?: Record<string, string>;
+  lastRun?: { phase: string; at: string; ms: number; ok: boolean; info?: string };
   lastPrice?: number;
   lastNews?: number;
   statsDay?: string;
@@ -109,19 +133,52 @@ export async function backfillInstrument(db: DB, id: string) {
   return { h: h.length, m15: m15.length, d1: d1.length };
 }
 
-export async function pollPrices(db: DB) {
-  await Promise.all(
+/**
+ * Kept deliberately light on outbound requests: the hosted worker has a per-run
+ * subrequest budget, so all candles go to the database in ONE upsert and daily
+ * candles are only refreshed when asked (about hourly).
+ */
+export async function pollPrices(db: DB, opts: { daily?: boolean } = {}) {
+  const daily = opts.daily ?? true;
+  const parts = await Promise.all(
     INSTRUMENTS.map(async (inst) => {
       const [m15, h, d1] = await Promise.all([
-        yahoo(inst.symbol, "15m", "2d"),
-        yahoo(inst.symbol, "60m", "5d"),
-        yahoo(inst.symbol, "1d", "1mo"),
+        yahoo(inst.symbol, "15m", "1d"),
+        yahoo(inst.symbol, "60m", "2d"),
+        daily
+          ? yahoo(inst.symbol, "1d", "1mo")
+          : Promise.resolve([] as Awaited<ReturnType<typeof yahoo>>),
       ]);
-      await upsertCandles(db, inst.id, "15m", m15);
-      await upsertCandles(db, inst.id, "1h", h);
-      await upsertCandles(db, inst.id, "1d", d1);
+      return [
+        ...toRows(inst.id, "15m", m15),
+        ...toRows(inst.id, "1h", h),
+        ...toRows(inst.id, "1d", d1),
+      ];
     }),
   );
+  const all = [
+    ...new Map(parts.flat().map((r) => [`${r.instrument}|${r.timeframe}|${r.ts}`, r])).values(),
+  ];
+  for (let i = 0; i < all.length; i += 1000) {
+    const { error } = await db
+      .from("candles")
+      .upsert(all.slice(i, i + 1000), { onConflict: "instrument,timeframe,ts" });
+    if (error) throw new Error(`upsert candles: ${error.message}`);
+  }
+  return all.length;
+}
+
+function toRows(inst: string, tf: string, rows: Awaited<ReturnType<typeof yahoo>>) {
+  return rows.map((r) => ({
+    instrument: inst,
+    timeframe: tf,
+    ts: new Date(r.t).toISOString(),
+    open: r.o,
+    high: r.h,
+    low: r.l,
+    close: r.c,
+    volume: r.v,
+  }));
 }
 
 export async function recomputeStats(db: DB, id?: string) {
@@ -134,16 +191,44 @@ export async function recomputeStats(db: DB, id?: string) {
       .from("pattern_stats")
       .upsert({ instrument: inst.id, data: stats as any, computed_at: new Date().toISOString() });
     if (error) throw new Error(error.message);
+    await cacheReactions(db, inst.id, c);
   }
+}
+
+/**
+ * Historical post-report reactions need ~2 years of hourly candles, which is too many
+ * reads to repeat on every 5-minute run. Compute them here (daily, per instrument) and
+ * cache them in job_state as `reactions:<INSTRUMENT>` → { [eventId]: Reaction }.
+ */
+export async function cacheReactions(db: DB, instId: string, c1h?: Candle[]) {
+  const c = c1h ?? (await loadCandles(db, instId, "1h", Date.now() - 740 * 86400_000));
+  const [{ data: ev }, { data: dates }] = await Promise.all([
+    db.from("events").select("*"),
+    db.from("event_dates").select("*"),
+  ]);
+  const out: Record<string, Reaction | null> = {};
+  for (const e of (ev ?? []) as EventRow[])
+    if (e.instruments.includes(instId))
+      out[e.id] = eventReaction(e, (dates ?? []) as EventDateRow[], c, Date.now());
+  await setState(db, `reactions:${instId}`, out);
 }
 
 // ---------------- News (free RSS) ----------------
 // NOTE: a social feed (e.g. X/Twitter, Reddit) could be added here later as another source
 // returning {title,url,source,published}. X's API is paid, so it's intentionally not included.
-const GOOGLE_QUERIES = ["crude oil", "WTI", "OPEC", "Strait of Hormuz", "silver price", "gold price", "Federal Reserve"];
+const GOOGLE_QUERIES = [
+  "crude oil",
+  "WTI",
+  "OPEC",
+  "Strait of Hormuz",
+  "silver price",
+  "gold price",
+  "Federal Reserve",
+];
 const FEEDS = [
   ...GOOGLE_QUERIES.map(
-    (q) => `https://news.google.com/rss/search?q=${encodeURIComponent(q + " when:1d")}&hl=en-US&gl=US&ceid=US:en`,
+    (q) =>
+      `https://news.google.com/rss/search?q=${encodeURIComponent(q + " when:1d")}&hl=en-US&gl=US&ceid=US:en`,
   ),
   "https://oilprice.com/rss/main",
   "https://www.fxstreet.com/rss/news",
@@ -167,11 +252,20 @@ const tag = (x: string, t: string) => {
 };
 
 export async function fetchNews(db: DB) {
-  const items: { url: string; title: string; title_key: string; source: string; published_at: string }[] = [];
+  const items: {
+    url: string;
+    title: string;
+    title_key: string;
+    source: string;
+    published_at: string;
+  }[] = [];
   await Promise.all(
     FEEDS.map(async (f) => {
       try {
-        const r = await fetch(f, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(6000) });
+        const r = await fetch(f, {
+          headers: { "User-Agent": UA },
+          signal: AbortSignal.timeout(6000),
+        });
         if (!r.ok) return;
         const xml = await r.text();
         const host = new URL(f).hostname.replace("www.", "");
@@ -190,7 +284,11 @@ export async function fetchNews(db: DB) {
           items.push({
             url,
             title,
-            title_key: title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().slice(0, 200),
+            title_key: title
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, " ")
+              .trim()
+              .slice(0, 200),
             source,
             published_at: new Date(pd || Date.now()).toISOString(),
           });
@@ -208,13 +306,26 @@ export async function fetchNews(db: DB) {
     seenT.add(i.title_key);
     return true;
   });
+  // One read + one write instead of one insert per headline (subrequest budget).
+  const { data: existing, error: exErr } = await db
+    .from("news")
+    .select("url,title_key")
+    .gte("published_at", new Date(Date.now() - 4 * 86400_000).toISOString())
+    .limit(5000);
+  if (exErr) throw new Error(`news lookup: ${exErr.message}`);
+  const haveU = new Set((existing ?? []).map((r) => r.url));
+  const haveT = new Set((existing ?? []).map((r) => r.title_key));
+  const fresh = uniq.filter((i) => !haveU.has(i.url) && !haveT.has(i.title_key));
   let inserted = 0;
-  for (let i = 0; i < uniq.length; i += 200) {
-    // ignore duplicates on either unique key
-    for (const row of uniq.slice(i, i + 200)) {
-      const { error } = await db.from("news").insert(row);
-      if (!error) inserted++;
-    }
+  if (fresh.length) {
+    const { error } = await db
+      .from("news")
+      .upsert(fresh, { onConflict: "url", ignoreDuplicates: true });
+    if (error) {
+      // Rare race on title_key: fall back to small per-row inserts for at most 15 rows.
+      for (const row of fresh.slice(0, 15))
+        if (!(await db.from("news").insert(row)).error) inserted++;
+    } else inserted = fresh.length;
   }
   return { fetched: uniq.length, inserted };
 }
@@ -240,7 +351,7 @@ export async function tagNews(db: DB) {
     .select("id,title,source")
     .eq("tagged", false)
     .order("published_at", { ascending: false })
-    .limit(20);
+    .limit(15);
   if (!rows?.length) return { tagged: 0 };
   const key = process.env.LOVABLE_API_KEY;
   if (!key) throw new Error("LOVABLE_API_KEY missing");
@@ -290,7 +401,10 @@ export async function tagNews(db: DB) {
   } catch (e: any) {
     const status = e?.statusCode ?? e?.cause?.statusCode;
     if (status === 402 || status === 403) {
-      await setState(db, "ai", { pausedUntil: Date.now() + 6 * 3600_000, reason: `AI ${status}: ${e.message}` });
+      await setState(db, "ai", {
+        pausedUntil: Date.now() + 6 * 3600_000,
+        reason: `AI ${status}: ${e.message}`,
+      });
     } else if (status === 429) {
       await setState(db, "ai", { pausedUntil: Date.now() + 15 * MIN, reason: "rate limited" });
     }
@@ -346,21 +460,35 @@ async function emit(
   if (inst && !alertEnabled(s, type, inst)) return;
   // cooldown: max 1 alert of same type per instrument per cooldown window
   const since = new Date(now - s.cooldown_min * MIN).toISOString();
-  let q = db.from("alerts").select("id", { count: "exact", head: true }).eq("type", type).gte("created_at", since).eq("status", "sent");
+  let q = db
+    .from("alerts")
+    .select("id", { count: "exact", head: true })
+    .eq("type", type)
+    .gte("created_at", since)
+    .eq("status", "sent");
   q = inst ? q.eq("instrument", inst) : q.is("instrument", null);
   const { count } = await q;
   if ((count ?? 0) > 0) return;
   const quiet = inQuiet(s, now);
   const { error } = await db
     .from("alerts")
-    .insert({ type, instrument: inst, dedupe_key: dedupe, message, status: quiet ? "quiet" : "pending" });
+    .insert({
+      type,
+      instrument: inst,
+      dedupe_key: dedupe,
+      message,
+      status: quiet ? "quiet" : "pending",
+    });
   if (error) return; // duplicate dedupe key => already handled
   if (quiet) return;
   try {
     await sendWhatsApp(message);
     await db.from("alerts").update({ status: "sent" }).eq("dedupe_key", dedupe);
   } catch (e) {
-    await db.from("alerts").update({ status: "failed", error: (e as Error).message }).eq("dedupe_key", dedupe);
+    await db
+      .from("alerts")
+      .update({ status: "failed", error: (e as Error).message })
+      .eq("dedupe_key", dedupe);
   }
 }
 
@@ -380,24 +508,35 @@ export async function runAlerts(db: DB, now = Date.now()) {
   for (const x of snap.instruments) {
     const inst = getInstrument(x.id)!;
     const tag = `${inst.emoji} ${inst.short}`;
-    const sentTxt = x.sent24.bullPct != null ? ` | News ${x.sent24.bullPct.toFixed(0)}% bullish` : "";
+    const sentTxt =
+      x.sent24.bullPct != null ? ` | News ${x.sent24.bullPct.toFixed(0)}% bullish` : "";
     const biasTxt = ` | Bias: ${x.bias.label} ${x.bias.confidence}`;
 
     // 1) Session heads-up at NY open
     if (now >= w.nyOpen && now < w.nyOpen + 20 * MIN && x.headsUp?.clear) {
       const h = x.headsUp;
       await emit(
-        db, s, "headsup", x.id, `headsup:${x.id}:${day}`,
+        db,
+        s,
+        "headsup",
+        x.id,
+        `headsup:${x.id}:${day}`,
         `${tag} | NY open | London ${arrow(h.londonMove)} ${sgn(h.londonMove)} | NY continued London ${h.rate?.toFixed(0)}% (n=${h.n})${sentTxt}${biasTxt}`,
         now,
       );
     }
     // 2) Sweep / BOS in first hour after London or NY open
-    const nearOpen = (now >= w.londonOpen && now < w.londonOpen + 60 * MIN) || (now >= w.nyOpen && now < w.nyOpen + 60 * MIN);
+    const nearOpen =
+      (now >= w.londonOpen && now < w.londonOpen + 60 * MIN) ||
+      (now >= w.nyOpen && now < w.nyOpen + 60 * MIN);
     if (nearOpen) {
       for (const f of x.flags.filter((f) => f.at >= now - 30 * MIN)) {
         await emit(
-          db, s, "structure", x.id, `structure:${x.id}:${day}:${f.level}:${f.side}:${f.kind}`,
+          db,
+          s,
+          "structure",
+          x.id,
+          `structure:${x.id}:${day}:${f.level}:${f.side}:${f.kind}`,
           `${tag} | ${currentSession(now)} | ${f.kind === "bos" ? "🧱" : "🎯"} ${f.text} @ ${f.price.toFixed(inst.decimals)}${biasTxt}`,
           now,
         );
@@ -409,7 +548,11 @@ export async function runAlerts(db: DB, now = Date.now()) {
       if (r > s.sudden_x * x.avgHourRange) {
         const mv = ((x.last15.c - x.last15.o) / x.last15.o) * 100;
         await emit(
-          db, s, "sudden", x.id, `sudden:${x.id}:${x.last15.t}`,
+          db,
+          s,
+          "sudden",
+          x.id,
+          `sudden:${x.id}:${x.last15.t}`,
           `⚡ ${tag} | Sudden ${mv >= 0 ? "🟢 surge" : "🔴 drop"} ${sgn(mv)} in 15m (${(r / x.avgHourRange).toFixed(1)}× avg hourly range) | ${x.last?.toFixed(inst.decimals)}`,
           now,
         );
@@ -420,7 +563,11 @@ export async function runAlerts(db: DB, now = Date.now()) {
     const pb = prevBias[x.id];
     if (pb && pb !== x.bias.label && x.bias.label !== "Neutral") {
       await emit(
-        db, s, "biasflip", x.id, `biasflip:${x.id}:${Math.floor(now / (15 * MIN))}`,
+        db,
+        s,
+        "biasflip",
+        x.id,
+        `biasflip:${x.id}:${Math.floor(now / (15 * MIN))}`,
         `🔄 ${tag} | Bias flip ${pb} → ${x.bias.label === "Bullish" ? "🟢" : "🔴"} ${x.bias.label} ${x.bias.confidence}`,
         now,
       );
@@ -436,7 +583,11 @@ export async function runAlerts(db: DB, now = Date.now()) {
       if (mins > 25 && mins <= 35) {
         const r = u.reactions[id];
         await emit(
-          db, s, "prereport", id, `pre:${u.event.id}:${u.ts}:${id}`,
+          db,
+          s,
+          "prereport",
+          id,
+          `pre:${u.event.id}:${u.ts}:${id}`,
           `⏰ ${inst.emoji} ${inst.short} | ${u.event.name} in 30m (${fmtDubaiTime(u.ts)} Dubai) | ${reactionText(u.event.name, inst.short, r)}`,
           now,
         );
@@ -448,7 +599,11 @@ export async function runAlerts(db: DB, now = Date.now()) {
         if (base && last) {
           const mv = ((last.c - base.o) / base.o) * 100;
           await emit(
-            db, s, "postreport", id, `post:${u.event.id}:${u.ts}:${id}`,
+            db,
+            s,
+            "postreport",
+            id,
+            `post:${u.event.id}:${u.ts}:${id}`,
             `📊 ${inst.emoji} ${inst.short} | ${u.event.name} reaction 1h: ${mv >= 0 ? "🟢" : "🔴"} ${sgn(mv)} | now ${last.c.toFixed(inst.decimals)}`,
             now,
           );
@@ -474,7 +629,11 @@ export async function runAlerts(db: DB, now = Date.now()) {
       const sDir = (n.sentiment as Record<string, string>)[id];
       const e = sDir === "bullish" ? "🟢" : sDir === "bearish" ? "🔴" : "⚪";
       await emit(
-        db, s, "news", id, `news:${n.id}:${id}`,
+        db,
+        s,
+        "news",
+        id,
+        `news:${n.id}:${id}`,
         `📰 ${inst.emoji} ${inst.short} | ${e} ${sDir} · impact ${n.impact} | ${n.title.slice(0, 120)} — ${n.reason ?? ""}`,
         now,
       );
@@ -486,9 +645,16 @@ export async function runAlerts(db: DB, now = Date.now()) {
 async function isHot(db: DB, now: number) {
   const keys = keyTimesAround(now);
   const { data: ev } = await db.from("events").select("*").eq("enabled", true);
-  const { data: dates } = await db.from("event_dates").select("*").gte("ts", new Date(now - 2 * 3600_000).toISOString()).lte("ts", new Date(now + 2 * 3600_000).toISOString());
+  const { data: dates } = await db
+    .from("event_dates")
+    .select("*")
+    .gte("ts", new Date(now - 2 * 3600_000).toISOString())
+    .lte("ts", new Date(now + 2 * 3600_000).toISOString());
   const { occurrences } = await import("./engine");
-  for (const e of ev ?? []) keys.push(...occurrences(e as any, (dates ?? []) as any, now - 2 * 3600_000, now + 2 * 3600_000));
+  for (const e of ev ?? [])
+    keys.push(
+      ...occurrences(e as any, (dates ?? []) as any, now - 2 * 3600_000, now + 2 * 3600_000),
+    );
   return keys.some((t) => now >= t - 30 * MIN && now <= t + 60 * MIN);
 }
 
@@ -505,19 +671,33 @@ export async function tick(db: DB, now = Date.now()) {
     const priceDue = open && (hot || !st.lastPrice || now - st.lastPrice >= 14 * MIN);
     const newsDue = !st.lastNews || now - st.lastNews >= 14 * MIN;
     const ny = tzParts(now, NY_TZ);
-    const statsDue = ny.h >= 17 && ny.wd >= 1 && ny.wd <= 5 && st.statsDay !== `${ny.y}-${ny.m}-${ny.d}`;
+    const statsDue =
+      ny.h >= 17 && ny.wd >= 1 && ny.wd <= 5 && st.statsDay !== `${ny.y}-${ny.m}-${ny.d}`;
     // Rotate phases so news/tagging still run during hot windows.
-    const cands = [priceDue && "prices", newsDue && "news", statsDue && "stats", "tag"].filter(Boolean) as string[];
+    const cands = [priceDue && "prices", newsDue && "news", statsDue && "stats", "tag"].filter(
+      Boolean,
+    ) as string[];
     const phase = cands.find((c) => c !== st.lastPhase) ?? cands[0];
     await setState(db, "poll", { ...st, lastPhase: phase });
 
+    const { data: rx } = await db.from("job_state").select("key").like("key", "reactions:%");
+    const noRx = INSTRUMENTS.find((i) => !(rx ?? []).some((r) => r.key === `reactions:${i.id}`));
     if (missing) {
       await backfillInstrument(db, missing.id);
       done.push(`backfill:${missing.id}`);
+    } else if (noRx) {
+      await cacheReactions(db, noRx.id);
+      done.push(`reactions:${noRx.id}`);
     } else if (phase === "prices") {
-      await pollPrices(db);
+      const daily = !st.lastDaily || now - st.lastDaily >= 55 * MIN;
+      await pollPrices(db, { daily });
       const s2 = await getState<PollState>(db, "poll");
-      await setState(db, "poll", { ...s2, lastPrice: now, lastError: undefined });
+      await setState(db, "poll", {
+        ...s2,
+        lastPrice: now,
+        ...(daily ? { lastDaily: now } : {}),
+        lastError: undefined,
+      });
       done.push("prices");
       await runAlerts(db, now);
       done.push("alerts");
@@ -527,20 +707,42 @@ export async function tick(db: DB, now = Date.now()) {
       await setState(db, "poll", { ...s2, lastNews: now });
       done.push(`news:${r.inserted}`);
     } else if (phase === "stats") {
-      await recomputeStats(db);
+      // One instrument per run keeps each run inside the request budget.
+      const dayKey = `${ny.y}-${ny.m}-${ny.d}`;
+      const next = INSTRUMENTS.find((i) => st.statsDone?.[i.id] !== dayKey);
+      if (next) await recomputeStats(db, next.id);
       const s2 = await getState<PollState>(db, "poll");
-      await setState(db, "poll", { ...s2, statsDay: `${ny.y}-${ny.m}-${ny.d}` });
-      done.push("stats");
+      const statsDone = { ...(s2.statsDone ?? {}), ...(next ? { [next.id]: dayKey } : {}) };
+      const all = INSTRUMENTS.every((i) => statsDone[i.id] === dayKey);
+      await setState(db, "poll", { ...s2, statsDone, ...(all ? { statsDay: dayKey } : {}) });
+      done.push(`stats:${next?.id ?? "-"}`);
     } else {
       const r = await tagNews(db);
       done.push(`tag:${JSON.stringify(r)}`);
     }
+    const s3 = await getState<PollState>(db, "poll");
+    await setState(db, "poll", {
+      ...s3,
+      lastRun: {
+        phase,
+        at: new Date(now).toISOString(),
+        ms: Date.now() - now,
+        ok: true,
+        info: done.join(","),
+      },
+    });
     return { done, hot };
   } catch (e) {
     const s2 = await getState<PollState>(db, "poll");
-    await setState(db, "poll", { ...s2, lastError: `${new Date(now).toISOString()} ${(e as Error).message}` });
+    await setState(db, "poll", {
+      ...s2,
+      lastError: `${new Date(now).toISOString()} ${(e as Error).message}`,
+    });
     throw e;
   } finally {
-    await db.from("job_state").update({ value: { until: new Date(0).toISOString() } }).eq("key", "lock:tick");
+    await db
+      .from("job_state")
+      .update({ value: { until: new Date(0).toISOString() } })
+      .eq("key", "lock:tick");
   }
 }
