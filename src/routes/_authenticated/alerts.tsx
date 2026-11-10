@@ -12,6 +12,7 @@ import { Empty, LoadError, PageTitle, RefreshButton } from "@/components/radar-c
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { WindowBanner } from "@/components/window-banner";
 
 const settingsQuery = queryOptions({ queryKey: ["settings"], queryFn: () => getSettings() });
 const alertsQuery = queryOptions({
@@ -44,6 +45,12 @@ function AlertsPage() {
       <PageTitle title="Alerts & settings" subtitle="WhatsApp heads-ups, data jobs and history.">
         <RefreshButton />
       </PageTitle>
+      <WindowBanner />
+      <p className="mb-6 text-sm text-muted-foreground">
+        Alerts only fire inside the trading window (Mon, Tue, Thu, Fri 18:00–21:00; Wed 17:00–20:00
+        Dubai, shifting an hour earlier during US daylight saving). You get a briefing 30 minutes
+        before and a recap at the end. Gold is switched off.
+      </p>
       <div className="grid gap-10 lg:grid-cols-2">
         <div className="space-y-10">
           <WhatsAppSection />

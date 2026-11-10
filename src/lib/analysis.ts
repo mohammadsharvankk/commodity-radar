@@ -160,7 +160,11 @@ export async function buildSnapshot(db: DB, now = Date.now()): Promise<Snapshot>
   // Upcoming events (next 7 days) + historical reactions per affected instrument.
   const upcoming: UpcomingEvent[] = [];
   const longH: Record<string, Candle[]> = {};
-  const enabled = events.filter((e) => e.enabled);
+  const activeIds = new Set<string>(INSTRUMENTS.map((i) => i.id));
+  const enabled = events
+    .filter((e) => e.enabled)
+    .map((e) => ({ ...e, instruments: e.instruments.filter((id) => activeIds.has(id)) }))
+    .filter((e) => e.instruments.length);
   const occ = enabled.flatMap((e) =>
     occurrences(e, dates, now - 70 * 60_000, now + 7 * d).map((ts) => ({ e, ts })),
   );

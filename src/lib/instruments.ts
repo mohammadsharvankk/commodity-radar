@@ -9,20 +9,49 @@ export interface Instrument {
   decimals: number;
 }
 
-// Priority order: WTI always first.
-export const INSTRUMENTS: Instrument[] = [
-  { id: "WTI", name: "WTI Crude Oil", short: "WTI", symbol: "CL=F", emoji: "🛢", decimals: 2 },
-  { id: "SILVER", name: "Silver", short: "Silver", symbol: "SI=F", emoji: "🥈", decimals: 3 },
-  { id: "GOLD", name: "Gold", short: "Gold", symbol: "GC=F", emoji: "🥇", decimals: 1 },
+// Priority order: WTI always first. Gold is switched off (rarely traded); set
+// active: true to bring it back everywhere (dashboard, polling, alerts, stats).
+export const ALL_INSTRUMENTS: (Instrument & { active: boolean })[] = [
+  {
+    id: "WTI",
+    name: "WTI Crude Oil",
+    short: "WTI",
+    symbol: "CL=F",
+    emoji: "🛢",
+    decimals: 2,
+    active: true,
+  },
+  {
+    id: "SILVER",
+    name: "Silver",
+    short: "Silver",
+    symbol: "SI=F",
+    emoji: "🥈",
+    decimals: 3,
+    active: true,
+  },
+  {
+    id: "GOLD",
+    name: "Gold",
+    short: "Gold",
+    symbol: "GC=F",
+    emoji: "🥇",
+    decimals: 1,
+    active: false,
+  },
 ];
+export const INSTRUMENTS: Instrument[] = ALL_INSTRUMENTS.filter((i) => i.active);
 
 export const INSTRUMENT_IDS: InstrumentId[] = INSTRUMENTS.map((i) => i.id);
 
 export function getInstrument(id: string): Instrument | undefined {
-  return INSTRUMENTS.find((i) => i.id === id);
+  return ALL_INSTRUMENTS.find((i) => i.id === id);
 }
 
 export const ALERT_TYPES = [
+  { id: "briefing", label: "Pre-window briefing (30 min before)" },
+  { id: "approach", label: "Price approaching a key level" },
+  { id: "recap", label: "End-of-window recap" },
   { id: "headsup", label: "Session heads-up at NY open" },
   { id: "structure", label: "Liquidity sweep / break of structure at session opens" },
   { id: "sudden", label: "Sudden move" },

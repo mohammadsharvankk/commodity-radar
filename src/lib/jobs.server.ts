@@ -4,7 +4,7 @@ import { Output, streamText } from "ai";
 import { z } from "zod";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { buildSnapshot, loadCandles, loadStats } from "./analysis";
+import { buildSnapshot, loadCandles, loadStats, type Snapshot } from "./analysis";
 import {
   computePatternStats,
   eventReaction,
@@ -15,11 +15,12 @@ import {
   type Reaction,
 } from "./engine";
 import { INSTRUMENTS, NY_TZ, getInstrument, type AlertTypeId } from "./instruments";
+import { MAX_ALERTS_PER_WINDOW, windowState, type TradingWindow } from "./window";
 import {
   currentSession,
   fmtDubaiTime,
   isMarketOpen,
-  keyTimesAround,
+  addDays,
   sessionWindows,
   tradingDayOf,
   tzParts,
@@ -509,6 +510,19 @@ async function emit(
   now: number,
 ) {
   if (inst && !alertEnabled(s, type, inst)) return;
+  // Silent outside the trading window; briefing (before) and recap (after) are the exceptions.
+  const ws = windowState(now);
+  const framing = type === "briefing" || type === "recap";
+  if (!framing) {
+    if (ws.phase !== "in" || !ws.win) return;
+    const { count: used } = await db
+      .from("alerts")
+      .select("id", { count: "exact", head: true })
+      .gte("created_at", new Date(ws.win.start).toISOString())
+      .in("status", ["sent", "pending"])
+      .not("type", "in", "(briefing,recap,test)");
+    if ((used ?? 0) >= MAX_ALERTS_PER_WINDOW) return;
+  }
   // cooldown: max 1 alert of same type per instrument per cooldown window
   const since = new Date(now - s.cooldown_min * MIN).toISOString();
   let q = db
@@ -608,19 +622,37 @@ export async function runAlerts(db: DB, now = Date.now()) {
       }
     }
     // 7) Bias flip
-    newBias[x.id] = x.bias.label;
-    const pb = prevBias[x.id];
-    if (pb && pb !== x.bias.label && x.bias.label !== "Neutral") {
+    // Only report a flip once the new bias has held for two checks in a row and differs
+    // from the last bias we alerted on (stops Neutral ↔ Bullish ping-pong).
+    const prev = (
+      prevBias as unknown as Record<string, { alerted?: string; cand?: string; n?: number }>
+    )[x.id];
+    const p0: { alerted?: string | undefined; cand?: string | undefined; n?: number | undefined } =
+      typeof prev === "object" && prev
+        ? prev
+        : typeof prev === "string"
+          ? { alerted: prev as string }
+          : {};
+    const n = p0.cand === x.bias.label ? (p0.n ?? 0) + 1 : 1;
+    let alerted = p0.alerted ?? x.bias.label;
+    if (
+      n >= 2 &&
+      x.bias.label !== alerted &&
+      x.bias.label !== "Neutral" &&
+      x.bias.confidence >= 60
+    ) {
       await emit(
         db,
         s,
         "biasflip",
         x.id,
         `biasflip:${x.id}:${Math.floor(now / (15 * MIN))}`,
-        `🔄 ${tag} | Bias flip ${pb} → ${x.bias.label === "Bullish" ? "🟢" : "🔴"} ${x.bias.label} ${x.bias.confidence}`,
+        `🔄 ${tag} | Bias now ${x.bias.label === "Bullish" ? "🟢" : "🔴"} ${x.bias.label} ${x.bias.confidence} (was ${alerted})`,
         now,
       );
-    }
+      alerted = x.bias.label;
+    } else if (n >= 2 && x.bias.label === "Neutral") alerted = "Neutral";
+    (newBias as unknown as Record<string, unknown>)[x.id] = { alerted, cand: x.bias.label, n };
   }
   await setState(db, "bias", newBias);
 
@@ -628,6 +660,7 @@ export async function runAlerts(db: DB, now = Date.now()) {
   for (const u of snap.upcoming) {
     const mins = (u.ts - now) / MIN;
     for (const id of u.event.instruments) {
+      if (!INSTRUMENTS.some((i) => i.id === id)) continue;
       const inst = getInstrument(id)!;
       if (mins > 25 && mins <= 35) {
         const r = u.reactions[id];
@@ -661,6 +694,12 @@ export async function runAlerts(db: DB, now = Date.now()) {
     }
   }
 
+  // 9) Trading-window extras: briefing before, approach-level alerts during, recap after
+  const ws = windowState(now);
+  if (ws.win && ws.phase === "pre") await sendBriefings(db, s, snap, ws.win, now);
+  if (ws.win && ws.phase === "in") await approachAlerts(db, s, snap, ws.win, now);
+  if (ws.win && ws.phase === "post") await sendRecaps(db, s, snap, ws.win, now);
+
   // 8) EIA Wednesday setup (WTI) + outcome log
   await eiaWednesday(db, s, now);
 
@@ -677,7 +716,7 @@ export async function runAlerts(db: DB, now = Date.now()) {
     await db.from("news").update({ alerted: true }).eq("id", n.id);
     for (const id of n.instruments) {
       const inst = getInstrument(id);
-      if (!inst) continue;
+      if (!inst || !INSTRUMENTS.some((i) => i.id === id)) continue;
       const sDir = (n.sentiment as Record<string, string>)[id];
       const e = sDir === "bullish" ? "🟢" : sDir === "bearish" ? "🔴" : "⚪";
       await emit(
@@ -690,6 +729,186 @@ export async function runAlerts(db: DB, now = Date.now()) {
         now,
       );
     }
+  }
+}
+
+// ---------------- Trading window: briefing / approach / recap ----------------
+const fmtP = (v: number, dec: number) => v.toFixed(dec);
+
+/** Range (% of open) of the same NY-clock window on recent weekdays, and today's Asia range vs normal. */
+function rangeContext(
+  c1h: Candle[],
+  win: TradingWindow,
+  asiaToday: { hi: number; lo: number } | null,
+) {
+  const wStartNy = tzParts(win.start, NY_TZ);
+  const winRanges: number[] = [];
+  const asiaRanges: number[] = [];
+  for (let k = 1; k <= 30 && winRanges.length < 20; k++) {
+    const day = addDays(wStartNy.y, wStartNy.m, wStartNy.d, -k);
+    if (day.wd === 0 || day.wd === 6) continue;
+    const startH = day.wd === 3 ? 8 : 9;
+    const a = zonedToUtc(day.y, day.m, day.d, startH, 0, NY_TZ);
+    const seg = c1h.filter((c) => c.t >= a && c.t < a + 3 * 3600_000);
+    if (seg.length >= 2) {
+      const hi = Math.max(...seg.map((c) => c.h)),
+        lo = Math.min(...seg.map((c) => c.l));
+      winRanges.push(((hi - lo) / seg[0].o) * 100);
+    }
+    const sw = sessionWindows(day.y, day.m, day.d);
+    const as = c1h.filter((c) => c.t >= sw.asiaStart && c.t < sw.londonOpen);
+    if (as.length >= 2) {
+      const hi = Math.max(...as.map((c) => c.h)),
+        lo = Math.min(...as.map((c) => c.l));
+      asiaRanges.push(((hi - lo) / as[0].o) * 100);
+    }
+  }
+  const avg = (xs: number[]) => (xs.length ? xs.reduce((p, c) => p + c, 0) / xs.length : null);
+  const typical = avg(winRanges);
+  const asiaAvg = avg(asiaRanges);
+  const asiaNow = asiaToday ? ((asiaToday.hi - asiaToday.lo) / asiaToday.lo) * 100 : null;
+  const ratio = asiaNow != null && asiaAvg ? asiaNow / asiaAvg : null;
+  // Backtest: widest-quarter Asia days → NY range ~1.25× normal; quiet Asia → ~0.9×.
+  const factor =
+    ratio == null ? 1 : ratio >= 1.5 ? 1.25 : ratio >= 1.15 ? 1.1 : ratio <= 0.7 ? 0.9 : 1;
+  return { typical, expected: typical != null ? typical * factor : null, ratio };
+}
+
+function keyLevels(x: Snapshot["instruments"][number]) {
+  const L: { name: string; price: number; side: "hi" | "lo" }[] = [];
+  const { asia, london, prevDay } = x.levels;
+  if (prevDay)
+    L.push(
+      { name: "prev-day high", price: prevDay.hi, side: "hi" },
+      { name: "prev-day low", price: prevDay.lo, side: "lo" },
+    );
+  if (asia)
+    L.push(
+      { name: "Asia high", price: asia.hi, side: "hi" },
+      { name: "Asia low", price: asia.lo, side: "lo" },
+    );
+  if (london)
+    L.push(
+      { name: "London high", price: london.hi, side: "hi" },
+      { name: "London low", price: london.lo, side: "lo" },
+    );
+  return L;
+}
+
+async function sendBriefings(db: DB, s: Settings, snap: Snapshot, win: TradingWindow, now: number) {
+  for (const x of snap.instruments) {
+    const inst = getInstrument(x.id)!;
+    if (!x.last) continue;
+    const c1h = await loadCandles(db, x.id, "1h", now - 45 * 86400_000);
+    const rc = rangeContext(c1h, win, x.levels.asia);
+    const lv = keyLevels(x)
+      .map((l) => ({ ...l, dist: ((l.price - x.last!) / x.last!) * 100 }))
+      .sort((a, b) => Math.abs(a.dist) - Math.abs(b.dist))
+      .slice(0, 4)
+      .map(
+        (l) =>
+          `${l.name} ${fmtP(l.price, inst.decimals)} (${l.dist >= 0 ? "+" : ""}${l.dist.toFixed(2)}%)`,
+      );
+    const { asia, london } = x.levels;
+    let sweep = "";
+    if (asia && london) {
+      const hiOnly = london.hi > asia.hi && london.lo >= asia.lo;
+      const loOnly = london.lo < asia.lo && london.hi <= asia.hi;
+      if (hiOnly)
+        sweep =
+          x.id === "WTI"
+            ? "London took the Asia HIGH only → NY has leaned up after this (2y avg +0.27%, mostly last year)."
+            : "London took the Asia high only (no reliable NY lean for silver).";
+      else if (loOnly)
+        sweep =
+          x.id === "WTI"
+            ? "London took the Asia LOW only → NY has leaned down after this (2y avg −0.24%)."
+            : "London took the Asia low only (no reliable NY lean for silver).";
+      else if (london.hi > asia.hi && london.lo < asia.lo)
+        sweep = "London took both Asia high and low (choppy).";
+      else sweep = "London stayed inside the Asia range.";
+    }
+    const events = snap.upcoming
+      .filter(
+        (u) => u.ts >= win.start - 15 * MIN && u.ts < win.end && u.event.instruments.includes(x.id),
+      )
+      .map((u) => `${u.event.name} ${fmtDubaiTime(u.ts)}`);
+    const rangeTxt =
+      rc.expected != null
+        ? `Expected window range ~${rc.expected.toFixed(1)}% (typical ${rc.typical!.toFixed(1)}%${rc.ratio != null ? `; Asia ${rc.ratio.toFixed(1)}× normal` : ""})`
+        : "";
+    const sent = x.sent24.bullPct != null ? `News 24h ${x.sent24.bullPct.toFixed(0)}% bullish` : "";
+    const lines = [
+      `📋 ${inst.emoji} ${inst.short} briefing | window ${fmtDubaiTime(win.start)}–${fmtDubaiTime(win.end)} Dubai | now ${fmtP(x.last, inst.decimals)}`,
+      rangeTxt,
+      lv.length ? `Levels: ${lv.join(" · ")}` : "",
+      sweep,
+      events.length
+        ? `Events: ${events.join(", ")}${x.id === "WTI" && events.some((e) => e.includes("EIA")) ? " (big pre-report move → report hour often spikes against it, then resumes)" : ""}`
+        : "",
+      [sent, `Bias ${x.bias.label} ${x.bias.confidence}`].filter(Boolean).join(" | "),
+      "Tip: set Plus500 price alerts at the nearest levels for instant triggers.",
+    ].filter(Boolean);
+    await emit(db, s, "briefing", x.id, `brief:${x.id}:${win.date}`, lines.join("\n"), now);
+  }
+}
+
+async function approachAlerts(
+  db: DB,
+  s: Settings,
+  snap: Snapshot,
+  win: TradingWindow,
+  now: number,
+) {
+  for (const x of snap.instruments) {
+    const inst = getInstrument(x.id)!;
+    if (!x.last || !x.lastTs || now - x.lastTs > 40 * MIN) continue;
+    const ny = x.levels.ny;
+    const thr = Math.max(x.last * 0.0012, (x.avgHourRange ?? 0) * 0.25);
+    for (const l of keyLevels(x)) {
+      // Only levels not yet taken out in the NY session and that price is approaching from the near side.
+      const taken = ny ? (l.side === "hi" ? ny.hi >= l.price : ny.lo <= l.price) : false;
+      const near =
+        l.side === "hi"
+          ? x.last < l.price && l.price - x.last <= thr
+          : x.last > l.price && x.last - l.price <= thr;
+      if (taken || !near) continue;
+      const pct = (Math.abs(l.price - x.last) / x.last) * 100;
+      await emit(
+        db,
+        s,
+        "approach",
+        x.id,
+        `approach:${x.id}:${win.date}:${l.name}`,
+        `🎯 ${inst.emoji} ${inst.short} | approaching ${l.name} ${fmtP(l.price, inst.decimals)} (now ${fmtP(x.last, inst.decimals)}, ${pct.toFixed(2)}% away) | watch for sweep & reclaim vs break & hold | Bias ${x.bias.label} ${x.bias.confidence}`,
+        now,
+      );
+    }
+  }
+}
+
+async function sendRecaps(db: DB, s: Settings, snap: Snapshot, win: TradingWindow, now: number) {
+  for (const x of snap.instruments) {
+    const inst = getInstrument(x.id)!;
+    const c = (await loadCandles(db, x.id, "15m", win.start)).filter((k) => k.t < win.end);
+    if (c.length < 2) continue;
+    const o = c[0].o,
+      cl = c.at(-1)!.c;
+    const hi = Math.max(...c.map((k) => k.h)),
+      lo = Math.min(...c.map((k) => k.l));
+    const touched = keyLevels(x)
+      .filter((l) => (l.side === "hi" ? hi >= l.price : lo <= l.price))
+      .map((l) => l.name);
+    const mv = ((cl - o) / o) * 100;
+    await emit(
+      db,
+      s,
+      "recap",
+      x.id,
+      `recap:${x.id}:${win.date}`,
+      `🧾 ${inst.emoji} ${inst.short} window recap | ${mv >= 0 ? "🟢" : "🔴"} ${sgn(mv)} | range ${(((hi - lo) / o) * 100).toFixed(2)}% (${fmtP(lo, inst.decimals)}–${fmtP(hi, inst.decimals)})${touched.length ? ` | took: ${touched.join(", ")}` : " | no key level taken"}`,
+      now,
+    );
   }
 }
 
@@ -768,23 +987,6 @@ async function eiaWednesday(db: DB, s: Settings, now: number) {
   }
 }
 
-// ---------------- Orchestrator (called every 2 min) ----------------
-async function isHot(db: DB, now: number) {
-  const keys = keyTimesAround(now);
-  const { data: ev } = await db.from("events").select("*").eq("enabled", true);
-  const { data: dates } = await db
-    .from("event_dates")
-    .select("*")
-    .gte("ts", new Date(now - 2 * 3600_000).toISOString())
-    .lte("ts", new Date(now + 2 * 3600_000).toISOString());
-  const { occurrences } = await import("./engine");
-  for (const e of ev ?? [])
-    keys.push(
-      ...occurrences(e as any, (dates ?? []) as any, now - 2 * 3600_000, now + 2 * 3600_000),
-    );
-  return keys.some((t) => now >= t - 30 * MIN && now <= t + 60 * MIN);
-}
-
 /** One bounded phase per call so each run stays short. */
 export async function tick(db: DB, now = Date.now()) {
   const { data: locked } = await db.rpc("try_job_lock", { _name: "tick", _seconds: 100 });
@@ -794,9 +996,13 @@ export async function tick(db: DB, now = Date.now()) {
   try {
     const missing = INSTRUMENTS.find((i) => !st.backfill?.[i.id]);
     const open = isMarketOpen(now);
-    const hot = open && (await isHot(db, now));
-    const priceDue = open && (hot || !st.lastPrice || now - st.lastPrice >= 14 * MIN);
-    const newsDue = !st.lastNews || now - st.lastNews >= 14 * MIN;
+    // Active only around the trading window: briefing (pre), live checks (in), recap (post).
+    // Outside it the app is silent: no price polling, no alerts; news is refreshed hourly so
+    // sentiment is ready for the next briefing.
+    const ws = windowState(now);
+    const hot = ws.phase !== "off";
+    const priceDue = open && hot;
+    const newsDue = !hot && (!st.lastNews || now - st.lastNews >= 55 * MIN);
     const ny = tzParts(now, NY_TZ);
     const statsDue =
       ny.h >= 17 && ny.wd >= 1 && ny.wd <= 5 && st.statsDay !== `${ny.y}-${ny.m}-${ny.d}`;
@@ -804,7 +1010,8 @@ export async function tick(db: DB, now = Date.now()) {
     const cands = [priceDue && "prices", newsDue && "news", statsDue && "stats", "tag"].filter(
       Boolean,
     ) as string[];
-    const phase = cands.find((c) => c !== st.lastPhase) ?? cands[0];
+    // In the window every run is a price run (5-minute checks); otherwise rotate.
+    const phase = priceDue ? "prices" : (cands.find((c) => c !== st.lastPhase) ?? cands[0]);
     await setState(db, "poll", { ...st, lastPhase: phase });
 
     const { data: rx } = await db.from("job_state").select("key").like("key", "reactions:%");
