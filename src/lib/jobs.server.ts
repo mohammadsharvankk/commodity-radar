@@ -375,9 +375,122 @@ const TagSchema = z.object({
   ),
 });
 
+// ---- Free keyword fallback when the AI tagger is unavailable (e.g. AI allowance used up) ----
+const KW: { re: RegExp; wti?: number; silver?: number; gold?: number; impact?: number }[] = [
+  { re: /\b(opec\+?|saudi|output cut|production cut|cuts? output|curb)/i, wti: 1, impact: 3 },
+  {
+    re: /\b((raise[sd]?|boost(s|ed)?|increase[sd]?|lift(s|ed)?) (\w+ )?(output|production|exports|supply)|output (hike|increase)|ramp(s|ed)? up)/i,
+    wti: -1.5,
+    impact: 3,
+  },
+  {
+    re: /\b(sanction|attack|strike[sd]? on|drone|missile|seiz|blockade|disrupt|outage|shut ?in|halt(ed)?|war|escalat)/i,
+    wti: 1,
+    gold: 1,
+    silver: 0.5,
+    impact: 4,
+  },
+  {
+    re: /\b(ceasefire|truce|peace (deal|talks)|de-?escalat|reopen)/i,
+    wti: -1,
+    gold: -1,
+    silver: -0.5,
+    impact: 3,
+  },
+  { re: /\bhormuz\b/i, wti: 0.5, impact: 4 },
+  {
+    re: /\b(inventor(y|ies) (draw|fall|drop)|crude draw|stockpiles? (fell|fall|drop))/i,
+    wti: 1,
+    impact: 3,
+  },
+  {
+    re: /\b(inventor(y|ies) (build|rise|jump)|crude build|stockpiles? (rose|rise|climb)|glut|surplus|oversuppl)/i,
+    wti: -1,
+    impact: 3,
+  },
+  { re: /\b(rate cut|dovish|cuts? rates|easing)\b/i, gold: 1, silver: 1, impact: 4 },
+  { re: /\b(rate hike|hawkish|hikes? rates|tightening)\b/i, gold: -1, silver: -1, impact: 4 },
+  {
+    re: /\b(strong(er)? dollar|dollar (rises|gains|jumps|climbs))/i,
+    gold: -1,
+    silver: -1,
+    wti: -0.5,
+    impact: 2,
+  },
+  {
+    re: /\b(weak(er)? dollar|dollar (falls|slips|drops|slides))/i,
+    gold: 1,
+    silver: 1,
+    wti: 0.5,
+    impact: 2,
+  },
+  {
+    re: /\b(recession|slowdown|weak demand|demand (worries|concerns|fears))/i,
+    wti: -1,
+    silver: -0.5,
+    impact: 3,
+  },
+  {
+    re: /\b(rall(y|ies)|surge|soar|jump|climb|gain|rise|rises|higher|record high)/i,
+    wti: 0.3,
+    silver: 0.3,
+    gold: 0.3,
+  },
+  {
+    re: /\b(slump|plunge|tumble|fall|falls|drop|slide|lower|sell-?off)/i,
+    wti: -0.3,
+    silver: -0.3,
+    gold: -0.3,
+  },
+];
+const MENTIONS: Record<"wti" | "silver" | "gold", RegExp> = {
+  wti: /\b(oil|crude|wti|brent|opec|barrel|petroleum|eia|hormuz|refiner|gasoline)/i,
+  silver: /\b(silver|precious metals?|xag)/i,
+  gold: /\b(gold|bullion|precious metals?|xau|fed|federal reserve|treasur|yields?)/i,
+};
+export function keywordTag(title: string) {
+  const score = { wti: 0, silver: 0, gold: 0 };
+  let impact = 1;
+  for (const k of KW)
+    if (k.re.test(title)) {
+      score.wti += k.wti ?? 0;
+      score.silver += k.silver ?? 0;
+      score.gold += k.gold ?? 0;
+      impact = Math.max(impact, k.impact ?? 2);
+    }
+  const sentiment: Record<string, string> = {};
+  const instruments: string[] = [];
+  for (const [k, id] of [
+    ["wti", "WTI"],
+    ["silver", "SILVER"],
+    ["gold", "GOLD"],
+  ] as const) {
+    if (!MENTIONS[k].test(title)) continue;
+    const v = score[k];
+    sentiment[id] = v >= 0.5 ? "bullish" : v <= -0.5 ? "bearish" : "neutral";
+    instruments.push(id);
+  }
+  return {
+    sentiment,
+    instruments,
+    impact: Math.min(impact, 4),
+    reason: "Keyword estimate (AI tagger unavailable)",
+  };
+}
+
+async function keywordTagRows(db: DB, rows: { id: string; title: string }[]) {
+  for (const r of rows) {
+    const t = keywordTag(r.title);
+    await db
+      .from("news")
+      .update({ tagged: true, ...t })
+      .eq("id", r.id);
+  }
+  return { tagged: rows.length, mode: "keywords" };
+}
+
 export async function tagNews(db: DB) {
   const ai = await getState<{ pausedUntil?: number; reason?: string }>(db, "ai");
-  if (ai.pausedUntil && ai.pausedUntil > Date.now()) return { skipped: ai.reason };
   const { data: rows } = await db
     .from("news")
     .select("id,title,source")
@@ -385,6 +498,7 @@ export async function tagNews(db: DB) {
     .order("published_at", { ascending: false })
     .limit(10);
   if (!rows?.length) return { tagged: 0 };
+  if (ai.pausedUntil && ai.pausedUntil > Date.now()) return keywordTagRows(db, rows);
   const key = process.env.LOVABLE_API_KEY;
   if (!key) throw new Error("LOVABLE_API_KEY missing");
   const provider = createOpenAI({
@@ -431,16 +545,16 @@ export async function tagNews(db: DB) {
     }
     return { tagged: out.items.length };
   } catch (e: any) {
+    // Pause the AI tagger and fall back to free keyword tagging so sentiment keeps flowing.
     const status = e?.statusCode ?? e?.cause?.statusCode;
-    if (status === 402 || status === 403) {
-      await setState(db, "ai", {
-        pausedUntil: Date.now() + 6 * 3600_000,
-        reason: `AI ${status}: ${e.message}`,
-      });
-    } else if (status === 429) {
-      await setState(db, "ai", { pausedUntil: Date.now() + 15 * MIN, reason: "rate limited" });
-    }
-    throw e;
+    const pause =
+      status === 429 ? 15 * MIN : status === 402 || status === 403 ? 6 * 3600_000 : 2 * 3600_000;
+    await setState(db, "ai", {
+      pausedUntil: Date.now() + pause,
+      reason: `AI ${status ?? "error"}: ${String(e?.message ?? e).slice(0, 160)}`,
+      at: new Date().toISOString(),
+    });
+    return keywordTagRows(db, rows);
   }
 }
 
